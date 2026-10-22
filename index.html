@@ -294,11 +294,11 @@ textarea#src {
           <button class="btn" id="openBtn">Open file</button>
           <button class="btn" id="sampleBtn">Use sample</button>
           <button class="btn" id="clearBtn">Clear</button>
-          <input type="file" id="fileInput" accept=".txt,.md,.csv,.tsv,.json,.log,.xml,.html,.yaml,.yml,.ini,.env,.docx,.xlsx" hidden>
+          <input type="file" id="fileInput" accept=".pdf,.txt,.md,.csv,.tsv,.json,.log,.xml,.html,.yaml,.yml,.ini,.env,.docx,.xlsx" hidden>
         </div>
       </div>
       <div class="drop" id="drop">
-        <textarea id="src" spellcheck="false" placeholder="Paste text here, or drop a .txt, .csv, .docx or .xlsx file."></textarea>
+        <textarea id="src" spellcheck="false" placeholder="Paste text here, or drop a .pdf, .docx, .xlsx, .txt or .csv file."></textarea>
       </div>
       <p class="fileline" id="fileLine"></p>
       <div class="policy-row">
@@ -944,6 +944,8 @@ window.PII_WASM_GZ = "H4sICH842moCA3BpaS53YXNtAOx9B3Qc13XoTu87s2VmlqoLqFGxZUGWZd
 
   const TF_URL = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1/dist/transformers.min.js';
   const WL_URL = 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/index.js';
+  const PDF_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.3.289/build/pdf.min.mjs';
+  const PDF_WORKER = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@6.3.289/build/pdf.worker.min.mjs';
   const WL_WASM = 'https://cdn.jsdelivr.net/npm/@wllama/wllama@3.8.1/esm/wasm/wllama.wasm';
 
   const KIND = {
@@ -1596,25 +1598,86 @@ window.PII_WASM_GZ = "H4sICH842moCA3BpaS53YXNtAOx9B3Qc13XoTu87s2VmlqoLqFGxZUGWZd
     S.view = v; $('vHi').setAttribute('aria-pressed', String(v === 'hi')); $('vRe').setAttribute('aria-pressed', String(v === 're')); render();
   }
 
+  // ---------- PDF (pdf.js) ----------
+  let pdfjs = null;
+  async function pdfText(file, onPage) {
+    if (!pdfjs) {
+      pdfjs = await import(PDF_URL);
+      pdfjs.GlobalWorkerOptions.workerSrc = PDF_WORKER;
+    }
+    const data = new Uint8Array(await file.arrayBuffer());
+    let doc;
+    const task = pdfjs.getDocument({ data, isEvalSupported: false, useSystemFonts: true });
+    try {
+      doc = await task.promise;
+    } catch (e) {
+      if (e && e.name === 'PasswordException') throw new Error('the PDF is password-protected. Remove the password and try again');
+      throw e;
+    }
+    const pages = [];
+    let chars = 0;
+    for (let n = 1; n <= doc.numPages; n++) {
+      onPage(n, doc.numPages);
+      const page = await doc.getPage(n);
+      const tc = await page.getTextContent();
+      let out = '', lastY = null, lastEnd = null;
+      for (const it of tc.items) {
+        if (typeof it.str !== 'string') continue;
+        const x = it.transform[4], y = it.transform[5];
+        if (lastY !== null && Math.abs(y - lastY) > Math.max(2, (it.height || 10) * 0.5)) {
+          out = out.replace(/[ \t]+$/, '');
+          if (out && !out.endsWith('\n')) out += '\n';
+        } else if (lastEnd !== null && it.str && !/\s$/.test(out) && !/^\s/.test(it.str) && x - lastEnd > (it.height || 10) * 0.15) {
+          out += ' ';
+        }
+        out += it.str;
+        if (it.hasEOL) out = out.replace(/[ \t]+$/, '') + '\n';
+        lastY = y; lastEnd = x + (it.width || 0);
+      }
+      out = out.replace(/\n{3,}/g, '\n\n').trim();
+      chars += out.replace(/\s/g, '').length;
+      pages.push(out);
+      page.cleanup();
+    }
+    const numPages = doc.numPages;
+    try { await task.destroy(); } catch (_) {}
+    if (chars < numPages * 5) {
+      throw new Error('this PDF has no text layer (it’s probably a scan or an image). Text recognition (OCR) isn’t supported yet');
+    }
+    return { text: pages.map((t, i) => (numPages > 1 ? `[Page ${i + 1}]\n` : '') + t).join('\n\n'), pages: numPages };
+  }
+
   // ---------- files ----------
   async function openFile(file) {
     if (!file) return;
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     $('fileLine').textContent = `Reading ${file.name}…`;
     try {
-      let text;
+      let text, extra = '';
       if (ext === 'docx' || ext === 'xlsx') {
         if (!S.rulesReady) throw new Error('the WebAssembly engine is still starting');
         const r = window.piiweb.extract(file.name, new Uint8Array(await file.arrayBuffer()));
         if (r.error) throw new Error(r.error);
         text = r.text;
-      } else if (['doc', 'xls', 'pdf', 'pptx', 'zip', 'png', 'jpg', 'jpeg'].includes(ext)) {
-        throw new Error('this file type isn’t supported. Use .docx, .xlsx or a text file');
+      } else if (ext === 'pdf' || file.type === 'application/pdf') {
+        try {
+          const r = await pdfText(file, (n, total) => { $('fileLine').textContent = `Reading ${file.name}: page ${n} of ${total}…`; });
+          text = r.text; extra = `${r.pages} page${r.pages === 1 ? '' : 's'}. `;
+        } catch (e) {
+          const m = String((e && e.message) || e);
+          if (/Failed to fetch|dynamically imported|NetworkError|Load failed/i.test(m)) {
+            throw new Error('the PDF reader couldn’t be downloaded from cdn.jsdelivr.net. Connect to the internet once, or open the self-hosted app');
+          }
+          throw new Error(m.replace(/\.$/, ''));
+        }
+      } else if (['doc', 'xls', 'pptx', 'ppt', 'zip', 'png', 'jpg', 'jpeg'].includes(ext)) {
+        throw new Error('this file type isn’t supported. Use .pdf, .docx, .xlsx or a text file');
       } else {
         text = await file.text();
       }
       $('src').value = text; S.fileName = file.name.replace(/\.[^.]+$/, '');
-      $('fileLine').textContent = `${file.name}: ${text.length.toLocaleString()} characters. Office files are converted to plain text; formatting isn’t kept.`;
+      const conv = /^(pdf|docx|xlsx)$/.test(ext) ? ' Converted to plain text; the redacted copy is saved as .txt, not as the original format.' : '';
+      $('fileLine').textContent = `${file.name}: ${extra}${text.length.toLocaleString()} characters.${conv}`;
       updateRun();
     } catch (e) {
       $('fileLine').textContent = `Couldn’t open ${file.name}: ${e.message || e}.`;
