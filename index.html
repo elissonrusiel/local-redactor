@@ -141,6 +141,7 @@ textarea#src {
   background: var(--paper); font: 400 13.5px/1.65 var(--mono); color: var(--ink); tab-size: 4;
 }
 .drop.over textarea { border-color: var(--focus); border-style: dashed; }
+.policy-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
 .fileline { font-size: .84rem; color: var(--muted); margin: 8px 0 0; min-height: 1.3em; overflow-wrap: anywhere; }
 .run-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
 .run-row .field { flex: 1 1 260px; }
@@ -183,12 +184,15 @@ textarea#src {
 .findings { margin-top: 14px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 .fgroup { min-width: 0; }
 .fgroup { border-top: 1px solid var(--line-2); padding-top: 10px; }
-.fgroup header { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: .92rem; }
+.fgroup header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-weight: 600; font-size: .92rem; }
 .swatch { width: 12px; height: 12px; border-radius: 3px; background: var(--kb); border: 2px solid var(--kc); flex: none; }
 .fgroup ul { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px; }
 .fgroup li { display: flex; align-items: center; gap: 8px; font-size: .88rem; padding: 3px 4px; border-radius: 6px; }
 .fgroup li:hover { background: var(--paper); }
 .fgroup li .val { font-family: var(--mono); font-size: .84rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; cursor: pointer; }
+.tag { font-size: .74rem; font-weight: 500; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--ok); color: var(--ok); margin-left: auto; white-space: nowrap; }
+.tag.review { border-color: var(--warn); color: var(--warn); }
+.fgroup .why { font-size: .8rem; color: var(--muted); margin: 2px 0 0 28px; max-width: 70ch; }
 .src { font-size: .76rem; color: var(--muted); white-space: nowrap; }
 .export { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
 
@@ -297,6 +301,20 @@ textarea#src {
         <textarea id="src" spellcheck="false" placeholder="Paste text here, or drop a .txt, .csv, .docx or .xlsx file."></textarea>
       </div>
       <p class="fileline" id="fileLine"></p>
+      <div class="policy-row">
+        <label class="field" style="flex:0 1 260px">Privacy rules
+          <select id="regime">
+            <option value="gdpr">GDPR (EU personal data)</option>
+            <option value="us">US: NIST SP 800-122 and CCPA</option>
+            <option value="hipaa">HIPAA Safe Harbor (health records)</option>
+            <option value="all">Redact everything found</option>
+          </select>
+        </label>
+        <label class="field">Never redact these terms
+          <input id="ignore" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+      <p class="note" id="regimeNote"></p>
       <div class="run-row">
         <label class="field">Extra words to redact, separated by commas
           <input id="terms" placeholder="Project Atlas, Northwind" autocomplete="off">
@@ -939,6 +957,115 @@ window.PII_WASM_GZ = "H4sICJMq2moCA3BpaS53YXNtAOx9B3Tc1pXooPcBpgAYuQ7pJm/imI7jWE
   const SEV = { critical: 4, high: 3, medium: 2, low: 1 };
   const ORDER = Object.keys(KIND);
 
+  // ---------- privacy-law policies: what is redacted by default ----------
+  // 'redact' = ticked automatically, 'review' = shown but left visible for a person to decide.
+  const R = (why) => ['redact', why], V = (why) => ['review', why];
+  const REGIMES = {
+    gdpr: {
+      name: 'GDPR',
+      note: 'Redacts personal data under GDPR Article 4(1): anything that identifies a living person directly or indirectly, including online identifiers such as IP addresses (Recital 30). Organisations and places are left for you to review.',
+      rules: {
+        PERSON: R('Names identify a person directly (Art. 4(1)).'),
+        EMAIL: R('Contact details relating to an identifiable person (Art. 4(1)).'),
+        PHONE: R('Contact details relating to an identifiable person (Art. 4(1)).'),
+        ADDRESS: R('Location data relating to a person (Art. 4(1)).'),
+        DATE_OF_BIRTH: R('Identifies a person indirectly when combined with other data (Art. 4(1)).'),
+        ID_NUMBER: R('Identification numbers are named in Art. 4(1).'),
+        SSN: R('National identification number (Art. 4(1), Art. 87).'),
+        CREDIT_CARD: R('Financial identifier relating to a person (Art. 4(1)).'),
+        IBAN: R('Financial identifier relating to a person (Art. 4(1)).'),
+        IP_ADDRESS: R('Online identifier (Art. 4(1), Recital 30).'),
+        MAC_ADDRESS: R('Device identifier that can single out a person (Art. 4(1), Recital 30).'),
+        USERNAME: R('Online identifier (Art. 4(1)).'),
+        SECRET: R('Credentials give access to a person’s account; redacted for security.'),
+        LOCATION: V('Places are personal data only when tied to a person, such as a home town.'),
+        ORGANIZATION: V('Organisations aren’t natural persons, so GDPR applies only if the name reveals something about someone.'),
+        OTHER: R('Flagged as personal by the language model. Check it.'),
+        CUSTOM: R('You asked to redact this word.'),
+      },
+    },
+    us: {
+      name: 'US (NIST SP 800-122 and CCPA)',
+      note: 'Redacts PII as defined by NIST SP 800-122 (data that distinguishes or traces a person) and personal information under the CCPA/CPRA, including device identifiers and log-in credentials. Organisations and places are linkable only when tied to a person, so they’re left for review.',
+      rules: {
+        PERSON: R('Names distinguish a person (NIST SP 800-122).'),
+        EMAIL: R('Email addresses are identifiers (NIST, CCPA).'),
+        PHONE: R('Telephone numbers are identifiers (NIST, CCPA).'),
+        ADDRESS: R('Postal addresses are identifiers (NIST, CCPA).'),
+        DATE_OF_BIRTH: R('Linkable PII that identifies someone when combined (NIST).'),
+        ID_NUMBER: R('Passport, licence and account numbers are sensitive personal information (CPRA).'),
+        SSN: R('Social Security numbers distinguish a person (NIST) and are sensitive personal information (CPRA).'),
+        CREDIT_CARD: R('Financial account numbers are sensitive personal information (CPRA) and covered by state breach laws.'),
+        IBAN: R('Financial account numbers are sensitive personal information (CPRA).'),
+        IP_ADDRESS: R('Asset identifier (NIST) and online identifier (CCPA).'),
+        MAC_ADDRESS: R('Asset identifier (NIST) and device identifier (CCPA).'),
+        USERNAME: R('Online identifier and account log-in (CCPA).'),
+        SECRET: R('Account log-in with password is sensitive personal information (CPRA).'),
+        LOCATION: V('Geographic indicators are PII only when linked to a person (NIST).'),
+        ORGANIZATION: V('Employment details are PII only when linked to a person (NIST).'),
+        OTHER: R('Flagged as personal by the language model. Check it.'),
+        CUSTOM: R('You asked to redact this word.'),
+      },
+    },
+    hipaa: {
+      name: 'HIPAA Safe Harbor',
+      note: 'Redacts the 18 identifiers HIPAA Safe Harbor requires removing from health records (45 CFR 164.514(b)(2)), including every place smaller than a state. Note: Safe Harbor also covers all dates except the year; this app detects dates of birth only.',
+      rules: {
+        PERSON: R('Names (Safe Harbor identifier 1).'),
+        ADDRESS: R('Geographic units smaller than a state (identifier 2).'),
+        LOCATION: R('Geographic units smaller than a state (identifier 2). Keep it visible only if it’s a state or country.'),
+        DATE_OF_BIRTH: R('All dates except the year (identifier 3).'),
+        PHONE: R('Telephone and fax numbers (identifiers 4 and 5).'),
+        EMAIL: R('Email addresses (identifier 6).'),
+        SSN: R('Social Security numbers (identifier 7).'),
+        ID_NUMBER: R('Medical record, health plan, account and licence numbers (identifiers 8 to 11).'),
+        CREDIT_CARD: R('Account numbers (identifier 10).'),
+        IBAN: R('Account numbers (identifier 10).'),
+        MAC_ADDRESS: R('Device identifiers and serial numbers (identifier 13).'),
+        IP_ADDRESS: R('IP addresses (identifier 15).'),
+        USERNAME: R('Any other unique identifying code (identifier 18).'),
+        SECRET: R('Not a Safe Harbor identifier, but redacted for security.'),
+        ORGANIZATION: V('Remove it if it’s the patient’s, a relative’s or a household member’s employer.'),
+        OTHER: R('Flagged as personal by the language model. Check it.'),
+        CUSTOM: R('You asked to redact this word.'),
+      },
+    },
+    all: {
+      name: 'everything found',
+      note: 'Redacts every item the selected method finds, including organisations and places. Use it when over-redacting is safer than missing something.',
+      rules: {},
+    },
+  };
+  const DEFAULT_IGNORE = 'R&D, HR, IT, CEO, CFO, CTO, COO, Q&A, M&A, P&L, KPI, KPIs, FAQ, ROI, B2B, B2C, SaaS, API, AI, ML, UX, UI';
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem('redactor:' + k); return v == null ? d : v; } catch (_) { return d; } },
+    set(k, v) { try { localStorage.setItem('redactor:' + k, v); } catch (_) {} },
+  };
+  function ruleFor(kind) {
+    const reg = REGIMES[$('regime').value] || REGIMES.gdpr;
+    return reg.rules[kind] || ['redact', $('regime').value === 'all' ? 'Strict mode redacts everything found.' : 'Redacted by default.'];
+  }
+  function ignoreSet() {
+    return new Set($('ignore').value.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean));
+  }
+  const norm = (t) => t.trim().toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}&]+$/gu, '');
+  // Returns findings with keep / policy / why set, dropping ignored terms.
+  function applyPolicy(list) {
+    const ign = ignoreSet(); let ignored = 0;
+    const out = [];
+    for (const f of list) {
+      if (f.source !== 'term' && (ign.has(norm(f.text)) || ign.has(f.text.trim().toLowerCase()))) { ignored++; continue; }
+      const [mode, why] = ruleFor(f.kind);
+      out.push({ ...f, policy: mode, why, keep: mode === 'redact' });
+    }
+    out.ignored = ignored;
+    return out;
+  }
+  function regimeNote() {
+    const reg = REGIMES[$('regime').value] || REGIMES.gdpr;
+    $('regimeNote').textContent = reg.note + ' These defaults are a starting point, not legal advice.';
+  }
+
   const S = {
     engine: 'rules', rulesReady: false, findings: [], text: '', view: 'hi', fileName: '',
     ner: null, nerLoading: false, wllama: null, llmLoading: false, abort: null, running: false,
@@ -1036,6 +1163,11 @@ window.PII_WASM_GZ = "H4sICJMq2moCA3BpaS53YXNtAOx9B3Tc1pXooPcBpgAYuQ7pJm/imI7jWE
     return KIND[u] ? u : 'OTHER';
   }
 
+  function confidence(score) {
+    const p = Math.min(99.9, Math.floor((score ?? 1) * 1000) / 10);
+    return (p >= 99 ? p.toFixed(1) : Math.round(p)) + '%';
+  }
+
   // ---------- Transformers.js entity model ----------
   async function loadNer() {
     if (S.nerLoading) return;
@@ -1093,7 +1225,7 @@ window.PII_WASM_GZ = "H4sICJMq2moCA3BpaS53YXNtAOx9B3Tc1pXooPcBpgAYuQ7pJm/imI7jWE
         if (!loc) continue;
         cursor = loc.end;
         const s = seg.start + loc.start, en = seg.start + loc.end;
-        out.push({ start: s, end: en, kind, text: text.slice(s, en), severity: KIND[kind][1], source: 'ner', by: `Entity model ${Math.round((e.score ?? 1) * 100)}%` });
+        out.push({ start: s, end: en, kind, text: text.slice(s, en), severity: KIND[kind][1], source: 'ner', by: `Entity model, ${confidence(e.score)} confidence` });
       }
     }
     return out;
@@ -1267,15 +1399,37 @@ window.PII_WASM_GZ = "H4sICJMq2moCA3BpaS53YXNtAOx9B3Tc1pXooPcBpgAYuQ7pJm/imI7jWE
     }
     const ms = performance.now() - t0;
     S.text = text;
-    S.findings = found.map((f) => ({ ...f, keep: true }));
+    S.raw = found;
+    S.findings = applyPolicy(found);
     const time = ms < 1000 ? `${Math.max(1, Math.round(ms))} ms` : `${(ms / 1000).toFixed(1)} s`;
     const n = S.findings.length;
-    let msg = n ? `Found ${n} item${n === 1 ? '' : 's'} in ${time} with ${label}.` : `Nothing found in ${time} with ${label}.`;
+    S.scanMsg = `in ${time} with ${label}.`;
+    let msg = summaryText();
     if (ctrl.signal.aborted) msg = `Stopped early. ${msg}`;
     if (dropped) msg += ` Ignored ${dropped} suggestion${dropped === 1 ? '' : 's'} that didn’t appear in the text.`;
     $('summary').textContent = msg;
     S.running = false; S.abort = null; $('stopBtn').hidden = true;
     render(); updateRun();
+  }
+
+  function policySummary() {
+    const red = S.findings.filter((f) => f.policy === 'redact').length;
+    const rev = S.findings.length - red;
+    const reg = REGIMES[$('regime').value] || REGIMES.gdpr;
+    return `Following ${reg.name}: ${red} redacted by default` + (rev ? `, ${rev} left for you to review.` : '.');
+  }
+  function summaryText() {
+    const n = S.findings.length;
+    let msg = n ? `Found ${n} item${n === 1 ? '' : 's'} ${S.scanMsg} ${policySummary()}` : `Nothing to redact ${S.scanMsg}`;
+    const ig = S.findings.ignored;
+    if (ig) msg += ` Skipped ${ig} common term${ig === 1 ? '' : 's'} on your never-redact list.`;
+    return msg;
+  }
+  function reapplyPolicy() {
+    if (!S.raw || S.running) return;
+    S.findings = applyPolicy(S.raw);
+    $('summary').textContent = summaryText();
+    render();
   }
 
   // ---------- rendering ----------
@@ -1347,7 +1501,11 @@ window.PII_WASM_GZ = "H4sICJMq2moCA3BpaS53YXNtAOx9B3Tc1pXooPcBpgAYuQ7pJm/imI7jWE
       cb.addEventListener('change', () => { idxs.forEach((i) => { S.findings[i].keep = cb.checked; }); render(); });
       const sw = document.createElement('span'); sw.className = 'swatch';
       const title = document.createElement('span'); title.textContent = `${KIND[kind] ? KIND[kind][0] : kind} (${idxs.length})`;
-      head.append(cb, sw, title); sec.append(head);
+      const pol = S.findings[idxs[0]];
+      const tag = document.createElement('span'); tag.className = 'tag' + (pol.policy === 'review' ? ' review' : '');
+      tag.textContent = pol.policy === 'review' ? 'Review' : 'Redact by default';
+      head.append(cb, sw, title, tag); sec.append(head);
+      const why = document.createElement('p'); why.className = 'why'; why.textContent = pol.why; sec.append(why);
       const ul = document.createElement('ul');
       for (const i of idxs) {
         const f = S.findings[i];
@@ -1518,7 +1676,7 @@ Priyanka`;
     updateRun();
   });
   $('clearBtn').addEventListener('click', () => {
-    $('src').value = ''; $('fileLine').textContent = ''; S.text = ''; S.findings = []; S.fileName = '';
+    $('src').value = ''; $('fileLine').textContent = ''; S.text = ''; S.findings = []; S.raw = null; S.fileName = '';
     $('summary').textContent = ''; render(); updateRun();
   });
   $('vHi').addEventListener('click', () => setView('hi'));
@@ -1529,6 +1687,12 @@ Priyanka`;
     if (e.key !== 'Enter' && e.key !== ' ') return;
     const el = e.target.closest('[data-i]'); if (el) { e.preventDefault(); toggleAt(el); }
   });
+  $('regime').value = store.get('regime', 'gdpr');
+  if (!REGIMES[$('regime').value]) $('regime').value = 'gdpr';
+  $('ignore').value = store.get('ignore', DEFAULT_IGNORE);
+  regimeNote();
+  $('regime').addEventListener('change', () => { store.set('regime', $('regime').value); regimeNote(); reapplyPolicy(); });
+  $('ignore').addEventListener('change', () => { store.set('ignore', $('ignore').value); reapplyPolicy(); });
   $('copyBtn').addEventListener('click', copy);
   $('saveBtn').addEventListener('click', save);
 
